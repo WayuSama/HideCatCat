@@ -1,0 +1,13 @@
+{
+    "Author": "YourName",
+    "Name": "Hide Cat Cat",
+    "Punchline": "A minimal Hide Cat Cat plugin",
+    "Description": "A basic Dalamud plugin template with command, config window, and DI.",
+    "IconUrl": "",
+    "RepoUrl": "",
+    "ApplicableVersion": "any",
+    "Tags": [
+        "hide-cat-cat",
+        "minigame"
+    ]
+}

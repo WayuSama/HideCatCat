@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<Project Sdk="Dalamud.CN.NET.Sdk/15.0.0">
+    <PropertyGroup>
+        <Authors>YourName</Authors>
+        <Description>躲猫猫</Description>
+        <Version>1.0.0.0</Version>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <ImplicitUsings>true</ImplicitUsings>
+        <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+        <BaseOutputPath>$(MSBuildProjectDirectory)\bin</BaseOutputPath>
+        <SatelliteResourceLanguages>xxx</SatelliteResourceLanguages>
+        <NoWarn>1701;1702;CS0414;CS8601;CS8602;CS8604;CS8603;IDE1006;MSB3270;MSB324;CS0649;CA2211;CS8509;CS8625;CS8618;CS8600;CS8605;CS8620</NoWarn>
+        <DebugType>none</DebugType>
+        <DebugSymbols>false</DebugSymbols>
+        <Optimize>True</Optimize>
+    </PropertyGroup>
+
+</Project>
