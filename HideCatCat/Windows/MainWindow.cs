@@ -408,61 +408,105 @@ public sealed class MainWindow : Window
 
     private void OnServerMessage(JsonElement json)
     {
-        var type = json.GetProperty("type").GetString();
-        Plugin.Log.Info($"[UI] 收到 {type}");
-        switch (type.ToUpperInvariant())
+        try
         {
-            case "PLAYER_LIST":
+            if (!json.TryGetProperty("type", out var typeEl) || typeEl.ValueKind != JsonValueKind.String)
             {
-                _hostName = json.GetProperty("hostName").GetString() ?? "";
-                _gameState = json.GetProperty("gameState").GetString() ?? "";
-                _settingsLocked = json.TryGetProperty("settingsLocked", out var sl) && sl.GetBoolean();
-                var newList = new List<PlayerInfo>();
-                foreach (var p in json.GetProperty("players").EnumerateArray())
-                {
-                    newList.Add(new PlayerInfo
-                    {
-                        name = p.GetProperty("name").GetString()!,
-                        team = p.GetProperty("team").GetString()!,
-                        ready = p.GetProperty("ready").GetBoolean(),
-                        isHost = p.GetProperty("isHost").GetBoolean(),
-                        eliminated = p.TryGetProperty("eliminated", out var el) && el.GetBoolean(),
-                        x = jsonTryGetDouble(p, "x"),
-                        y = jsonTryGetDouble(p, "y"),
-                        z = jsonTryGetDouble(p, "z"),
-                    });
-                }
-                lock (_playersLock) { _players = newList; }
-                _hasJoined = GetPlayersSnapshot().Any(p => p.name == _playerName);
-                break;
+                Plugin.Log.Warning("[UI] 收到无 type 字段的消息，已忽略");
+                return;
             }
+            var type = typeEl.GetString()!;
+            Plugin.Log.Info($"[UI] 收到 {type}");
+            switch (type.ToUpperInvariant())
+            {
+                case "PLAYER_LIST":
+                {
+                    _hostName = jsonTryGetString(json, "hostName");
+                    _gameState = jsonTryGetString(json, "gameState");
+                    _settingsLocked = json.TryGetProperty("settingsLocked", out var sl) && sl.ValueKind == JsonValueKind.True;
+                    var newList = new List<PlayerInfo>();
+                    if (json.TryGetProperty("players", out var playersEl) && playersEl.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var p in playersEl.EnumerateArray())
+                        {
+                            newList.Add(new PlayerInfo
+                            {
+                                name = jsonTryGetString(p, "name"),
+                                team = jsonTryGetString(p, "team"),
+                                ready = p.TryGetProperty("ready", out var r) && r.ValueKind == JsonValueKind.True,
+                                isHost = p.TryGetProperty("isHost", out var h) && h.ValueKind == JsonValueKind.True,
+                                eliminated = p.TryGetProperty("eliminated", out var el) && el.ValueKind == JsonValueKind.True,
+                                x = jsonTryGetDouble(p, "x"),
+                                y = jsonTryGetDouble(p, "y"),
+                                z = jsonTryGetDouble(p, "z"),
+                            });
+                        }
+                    }
+                    lock (_playersLock) { _players = newList; }
+                    _hasJoined = GetPlayersSnapshot().Any(p => p.name == _playerName);
+                    break;
+                }
 
-            case "ALL_READY":
-                _gameState = "ALL_READY";
-                break;
+                case "ALL_READY":
+                    _gameState = "ALL_READY";
+                    break;
 
-            case "START_GAME":
-                _gameOver = false;
-                _gameStarted = true;
-                _gameStartTime = DateTime.Now;
-                _timeLimitSec = json.GetProperty("timeLimitSec").GetInt32();
-                var sp = json.GetProperty("startPos");
-                _startX = sp.GetProperty("x").GetDouble();
-                _startY = sp.GetProperty("y").GetDouble();
-                _startZ = sp.GetProperty("z").GetDouble();
-                _lastEvent = $"游戏开始！半径: {json.GetProperty("radius").GetSingle():F0} yalms";
-                break;
+                case "START_GAME":
+                    _gameOver = false;
+                    _gameStarted = true;
+                    _gameStartTime = DateTime.Now;
+                    _timeLimitSec = TryGetInt32(json, "timeLimitSec", 300);
+                    if (json.TryGetProperty("startPos", out var sp))
+                    {
+                        _startX = jsonTryGetDouble(sp, "x");
+                        _startY = jsonTryGetDouble(sp, "y");
+                        _startZ = jsonTryGetDouble(sp, "z");
+                    }
+                    _lastEvent = $"游戏开始！半径: {TryGetSingle(json, "radius", 50f):F0} yalms";
+                    break;
 
-            case "CATCH_EVENT":
-                _lastEvent = $"[Cat]{json.GetProperty("catName").GetString()} caught [Mouse]{json.GetProperty("mouseName").GetString()}! Mice left: {json.GetProperty("miceRemaining")}/{json.GetProperty("miceTotal")}";
-                break;
+                case "CATCH_EVENT":
+                    _lastEvent = $"[Cat]{jsonTryGetString(json, "catName")} caught [Mouse]{jsonTryGetString(json, "mouseName")}! " +
+                                 $"Mice left: {jsonTryGetInt(json, "miceRemaining")}/{jsonTryGetInt(json, "miceTotal")}";
+                    break;
 
-            case "GAME_OVER":
-                _gameStarted = false;
-                _gameOver = true;
-                _lastEvent = $"Winner: {json.GetProperty("winner").GetString()}! {json.GetProperty("reason").GetString()}";
-                break;
+                case "GAME_OVER":
+                    _gameStarted = false;
+                    _gameOver = true;
+                    _lastEvent = $"Winner: {jsonTryGetString(json, "winner")}! {jsonTryGetString(json, "reason")}";
+                    break;
+            }
         }
+        catch (Exception ex)
+        {
+            Plugin.Log.Error($"[UI] 处理消息异常: {ex.Message}");
+        }
+    }
+
+    private static string jsonTryGetString(JsonElement el, string key)
+    {
+        return el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+    }
+
+    private static int jsonTryGetInt(JsonElement el, string key)
+    {
+        if (el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number)
+            return v.GetInt32();
+        return 0;
+    }
+
+    private static int TryGetInt32(JsonElement el, string key, int defaultValue)
+    {
+        if (el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number)
+            return v.GetInt32();
+        return defaultValue;
+    }
+
+    private static float TryGetSingle(JsonElement el, string key, float defaultValue)
+    {
+        if (el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number)
+            return v.GetSingle();
+        return defaultValue;
     }
 
     private class PlayerInfo
