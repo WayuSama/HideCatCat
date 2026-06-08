@@ -9,7 +9,7 @@ public sealed class PluginConfig : IPluginConfiguration
     public bool IsOpen { get; set; } = true;
 
     // WebSocket 服务器地址
-    public string ServerUrl { get; set; } = "wss://your-server:port/ws";
+    public string ServerUrl { get; set; } = "wss://hidecatcat.19730123.xyz:19174/ws";
 
     // 悬浮 HUD 位置 — 队友距离（非游戏状态）
     public float OverlayX { get; set; } = 0.5f;

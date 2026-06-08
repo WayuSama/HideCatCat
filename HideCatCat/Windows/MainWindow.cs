@@ -21,6 +21,12 @@ public sealed class MainWindow : Window
     private int _winCount = 1;
     private int _timeLimitMin = 5;
     private string _errorMessage = "";
+    private string _roomServer = "";
+    private uint _roomTerritoryId;
+
+    // 关于/设置面板折叠状态
+    private bool _showAbout;
+    private bool _showSettings;
 
     // Game state (from server)
     private readonly object _playersLock = new();
@@ -35,7 +41,7 @@ public sealed class MainWindow : Window
     private string _lastEvent = "";
     private bool _gameOver;
 
-    public MainWindow(Plugin plugin, GameClient gameClient) : base("Hide Cat Cat 🐱🐭")
+    public MainWindow(Plugin plugin, GameClient gameClient) : base("Hide Cat Cat")
     {
         _plugin = plugin;
         _gameClient = gameClient;
@@ -63,7 +69,7 @@ public sealed class MainWindow : Window
 
     public override void Draw()
     {
-        // 连接状态
+        // 顶栏：连接状态 + 按钮
         if (_gameClient.IsConnected)
         {
             ImGui.TextColored(new Vector4(0.2f, 0.9f, 0.3f, 1f), "● 已连接");
@@ -75,18 +81,60 @@ public sealed class MainWindow : Window
             ImGui.TextColored(new Vector4(0.9f, 0.3f, 0.3f, 1f), "● 未连接");
         }
 
-        ImGui.Separator();
-
-        // HUD 编辑模式开关
-        var editMode = _plugin.OverlayEditMode;
-        if (ImGui.Checkbox("编辑 HUD 位置", ref editMode))
-            _plugin.OverlayEditMode = editMode;
+        // 圆形 ? 按钮（紧挨连接状态）
         ImGui.SameLine();
-        ImGui.TextDisabled("(?)");
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 999f);
+        if (ImGui.SmallButton("?")) _showAbout = !_showAbout;
+        ImGui.PopStyleVar();
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("开启后可直接拖拽屏幕上的 HUD 调整位置");
+            ImGui.SetTooltip("关于躲猫猫");
 
         ImGui.Separator();
+
+        // HUD 编辑模式开关（仅鼠队+游戏开始后显示）
+        if (_gameStarted && _selectedTeam == "MOUSE")
+        {
+            var editMode = _plugin.OverlayEditMode;
+            if (ImGui.Checkbox("编辑 HUD 位置", ref editMode))
+                _plugin.OverlayEditMode = editMode;
+            ImGui.SameLine();
+            ImGui.TextDisabled("(?)");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("开启后可直接拖拽屏幕上的 HUD 调整位置");
+        }
+
+        ImGui.Separator();
+
+        // ── 关于面板 ──
+        if (_showAbout)
+        {
+            ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0.15f, 0.15f, 0.2f, 0.85f));
+            ImGui.BeginChild("##AboutPanel", new Vector2(0, 140), true);
+            ImGui.TextWrapped("躲猫猫 HideCatCat");
+            ImGui.Spacing();
+            ImGui.TextWrapped("猫队需要在限定时间内抓住所有鼠队玩家，鼠队需要躲避猫队的追捕存活到时间结束。");
+            ImGui.Spacing();
+            ImGui.TextColored(new Vector4(1f, 0.9f, 0.4f, 1f), "QQ群: 710780045");
+            ImGui.SameLine();
+            ImGui.TextDisabled("— 提交建议 / 反馈Bug");
+            ImGui.EndChild();
+            ImGui.PopStyleColor();
+            ImGui.Spacing();
+        }
+
+        // ── 设置面板 ──
+        if (_showSettings)
+        {
+            ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0.15f, 0.15f, 0.2f, 0.85f));
+            ImGui.BeginChild("##SettingsPanel", new Vector2(0, 80), true);
+            ImGui.TextWrapped("躲猫猫服务器地址（可自建服务端后修改）:");
+            var serverUrl = _plugin.ServerUrl;
+            if (ImGui.InputText("##ServerUrl", ref serverUrl, 100))
+                _plugin.ServerUrl = serverUrl;
+            ImGui.EndChild();
+            ImGui.PopStyleColor();
+            ImGui.Spacing();
+        }
 
         // 连接面板
         if (!_gameClient.IsConnected)
@@ -117,13 +165,12 @@ public sealed class MainWindow : Window
             return;
         }
 
-        // 服务器地址
-        var serverUrl = _plugin.ServerUrl;
+        // 服务器地址（只读 + 齿轮按钮修改）
         ImGui.Text("服务器:");
         ImGui.SameLine();
-        ImGui.InputText("##serverUrl", ref serverUrl, 100);
-        if (serverUrl != _plugin.ServerUrl)
-            _plugin.ServerUrl = serverUrl;
+        ImGui.TextDisabled(_plugin.ServerUrl);
+        ImGui.SameLine();
+        DrawGearButton();
 
         // 自动生成口令
         if (string.IsNullOrEmpty(_password))
@@ -142,8 +189,8 @@ public sealed class MainWindow : Window
         if (ImGui.Button("连接", new Vector2(200, 30)) && !string.IsNullOrEmpty(_password))
         {
             _errorMessage = "";
-            Plugin.Log.Info($"[UI] 点击连接 url={serverUrl} password=*** player={_playerName}");
-            _ = _gameClient.ConnectAsync(serverUrl, _password);
+            Plugin.Log.Info($"[UI] 点击连接 url={_plugin.ServerUrl} password=*** player={_playerName}");
+            _ = _gameClient.ConnectAsync(_plugin.ServerUrl, _password);
         }
 
         if (!string.IsNullOrEmpty(_errorMessage))
@@ -167,11 +214,28 @@ public sealed class MainWindow : Window
     private void DrawTeamSelection()
     {
         ImGui.Separator();
+
+        // 显示房间基准服务器/地图
+        if (!string.IsNullOrEmpty(_roomServer))
+        {
+            var myServer = _plugin.HomeWorldName;
+            var myTerritory = _plugin.CurrentTerritoryId;
+            var serverMatch = myServer == _roomServer;
+            var mapMatch = myTerritory == _roomTerritoryId;
+
+            ImGui.Text($"房间: {_roomServer} (地图ID: {_roomTerritoryId})");
+            ImGui.TextColored(serverMatch ? new Vector4(0.2f, 0.9f, 0.3f, 1f) : new Vector4(1f, 0.3f, 0.3f, 1f),
+                $"你的服务器: {myServer} {(serverMatch ? "✓" : "✗")}");
+            ImGui.TextColored(mapMatch ? new Vector4(0.2f, 0.9f, 0.3f, 1f) : new Vector4(1f, 0.3f, 0.3f, 1f),
+                $"你的地图: {myTerritory} {(mapMatch ? "✓" : "✗")}");
+            ImGui.Spacing();
+        }
+
         ImGui.Text("选择阵营:");
 
-        if (ImGui.Button("🐱 猫队", new Vector2(200, 40)))
+        if (ImGui.Button("[猫队]", new Vector2(200, 40)))
             _ = JoinRoomAsync("CAT");
-        if (ImGui.Button("🐭 鼠队", new Vector2(200, 40)))
+        if (ImGui.Button("[鼠队]", new Vector2(200, 40)))
             _ = JoinRoomAsync("MOUSE");
     }
 
@@ -189,7 +253,8 @@ public sealed class MainWindow : Window
         }
         Plugin.Log.Info($"[UI] 发送 JOIN_ROOM team={team}");
         var server = _plugin.HomeWorldName;
-        await _gameClient.SendAsync(new { type = "JOIN_ROOM", password = _password, playerName = _playerName, playerServer = server, team });
+        var territoryId = _plugin.CurrentTerritoryId;
+        await _gameClient.SendAsync(new { type = "JOIN_ROOM", password = _password, playerName = _playerName, playerServer = server, territoryId, team });
     }
 
     private void DrawGamePanel()
@@ -199,8 +264,8 @@ public sealed class MainWindow : Window
         // 房主设置
         if (_playerName == _hostName && !_settingsLocked)
         {
-            ImGui.TextColored(new Vector4(1f, 0.9f, 0.4f, 1f), "👑 房主设置");
-            if (ImGui.Button("📍 设为当前位置")) SetStartPoint();
+            ImGui.TextColored(new Vector4(1f, 0.9f, 0.4f, 1f), "[房主设置]");
+            if (ImGui.Button("[设为当前位置]")) SetStartPoint();
 
             ImGui.Text("半径 (yalms):");
             ImGui.SameLine();
@@ -227,7 +292,7 @@ public sealed class MainWindow : Window
             ImGui.InputInt("##time", ref _timeLimitMin);
             if (_timeLimitMin < 1) _timeLimitMin = 1;
 
-            if (ImGui.Button("⚙ 应用设置", new Vector2(200, 25)))
+            if (ImGui.Button("[应用设置]", new Vector2(200, 25)))
                 _ = SendSettings();
         }
 
@@ -239,9 +304,9 @@ public sealed class MainWindow : Window
         lock (_playersLock) { playersSnapshot = _players.ToList(); }
         foreach (var p in playersSnapshot)
         {
-            var icon = p.team switch { "CAT" => "🐱", "MOUSE" => "🐭", _ => "❓" };
-            var ready = p.ready ? "✅" : "⏳";
-            var host = p.isHost ? "👑" : "";
+            var icon = p.team switch { "CAT" => "[猫]", "MOUSE" => "[鼠]", _ => "?" };
+            var ready = p.ready ? "[R]" : "...";
+            var host = p.isHost ? "[H]" : "";
             ImGui.Text($"  {host}{icon} {p.name} {ready}");
         }
 
@@ -253,7 +318,7 @@ public sealed class MainWindow : Window
             if (_gameOver)
             {
                 ImGui.TextColored(new Vector4(0.2f, 0.8f, 1f, 1f), "游戏结束");
-                if (ImGui.Button("🔄 重新开始", new Vector2(200, 30)))
+                if (ImGui.Button("[重新开始]", new Vector2(200, 30)))
                 {
                     Plugin.Log.Info("[UI] 点击重新开始");
                     ResetLocalState();
@@ -264,7 +329,7 @@ public sealed class MainWindow : Window
             }
             else
             {
-                if (ImGui.Button("✅ 准备", new Vector2(200, 30)))
+                if (ImGui.Button("[准备]", new Vector2(200, 30)))
                 {
                     Plugin.Log.Info("[UI] 点击准备");
                     _ = _gameClient.SendAsync(new { type = "READY", password = _password });
@@ -272,7 +337,7 @@ public sealed class MainWindow : Window
 
                 if (_playerName == _hostName && _gameState == "ALL_READY")
                 {
-                    if (ImGui.Button("▶ 开始游戏", new Vector2(200, 30)))
+                    if (ImGui.Button("[开始游戏]", new Vector2(200, 30)))
                     {
                         Plugin.Log.Info("[UI] 房主点击开始游戏");
                         _ = _gameClient.SendAsync(new { type = "START_GAME", password = _password });
@@ -395,9 +460,36 @@ public sealed class MainWindow : Window
         {
             _selectedTeam = "";
             _hasJoined = false;
+            _roomServer = "";
+            _roomTerritoryId = 0;
             lock (_playersLock) { _players.Clear(); }
             _gameStarted = false;
             _gameOver = false;
+        }
+    }
+
+    private void DrawGearButton()
+    {
+        var gearSize = ImGui.GetFrameHeight();
+        var gearPos = ImGui.GetCursorScreenPos();
+        var gearCenter = gearPos + new Vector2(gearSize / 2, gearSize / 2);
+        var clicked = ImGui.InvisibleButton("##GearBtn", new Vector2(gearSize, gearSize));
+        if (clicked) _showSettings = !_showSettings;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("修改服务器地址");
+
+        var dl = ImGui.GetWindowDrawList();
+        var hovered = ImGui.IsItemHovered();
+        var col = hovered ? 0xFFFFFFFF : 0xFFCCCCCC;
+        dl.AddCircleFilled(gearCenter, gearSize * 0.32f, col);
+        dl.AddCircleFilled(gearCenter, gearSize * 0.16f, 0xFF000000);
+        for (int i = 0; i < 8; i++)
+        {
+            var angle = i * MathF.PI / 4;
+            var outer = gearCenter + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * gearSize * 0.42f;
+            var inner = gearCenter + new Vector2(MathF.Cos(angle), MathF.Sin(angle)) * gearSize * 0.28f;
+            var perp = new Vector2(-MathF.Sin(angle), MathF.Cos(angle)) * gearSize * 0.08f;
+            dl.AddQuadFilled(inner - perp, inner + perp, outer + perp, outer - perp, col);
         }
     }
 
@@ -444,6 +536,10 @@ public sealed class MainWindow : Window
                     }
                     lock (_playersLock) { _players = newList; }
                     _hasJoined = GetPlayersSnapshot().Any(p => p.name == _playerName);
+                    // 同步房间基准服务器和地图
+                    _roomServer = jsonTryGetString(json, "roomServer");
+                    if (json.TryGetProperty("roomTerritoryId", out var rt) && rt.ValueKind == JsonValueKind.Number)
+                        _roomTerritoryId = rt.GetUInt32();
                     break;
                 }
 

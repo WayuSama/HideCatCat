@@ -48,6 +48,9 @@ public sealed class Plugin : IAsyncDalamudPlugin
     /// <summary>玩家所在服务器名</summary>
     public string HomeWorldName => _playerState.HomeWorld.ValueNullable?.Name.ToString() ?? "";
 
+    /// <summary>当前地图 ID（TerritoryType）</summary>
+    public uint CurrentTerritoryId => _client.TerritoryType;
+
     /// <summary>WebSocket 服务器地址（持久化）</summary>
     public string ServerUrl
     {
