@@ -8,6 +8,8 @@ using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Textures;
+using Dalamud.Interface.Textures.TextureWraps;
 using HideCatCat.Windows;
 
 namespace HideCatCat;
@@ -26,6 +28,7 @@ public sealed class Plugin : IAsyncDalamudPlugin
     private readonly ICommandManager _command;
     private readonly IPluginLog _log;
     private readonly INamePlateGui _namePlateGui;
+    private readonly ITextureProvider _textureProvider;
 
     public static IPluginLog Log { get; private set; } = null!;
 
@@ -61,6 +64,17 @@ public sealed class Plugin : IAsyncDalamudPlugin
         set { _config.ServerUrl = value; _pi.SavePluginConfig(_config); }
     }
 
+    /// <summary>自定义服务器地址历史（持久化，不含默认地址）</summary>
+    public List<string> ServerHistory => _config.ServerHistory;
+
+    /// <summary>添加自定义地址到历史（去重，持久化）</summary>
+    public void AddServerToHistory(string url)
+    {
+        _config.ServerHistory.Remove(url);
+        _config.ServerHistory.Insert(0, url);
+        _pi.SavePluginConfig(_config);
+    }
+
     /// <summary>HUD 编辑模式（持久化）</summary>
     public bool OverlayEditMode
     {
@@ -74,6 +88,10 @@ public sealed class Plugin : IAsyncDalamudPlugin
     private bool _dragging;
     private Vector2 _dragOffset;
 
+    // 边界蒙版径向渐变纹理
+    private IDalamudTextureWrap? _boundaryGradientTexture;
+    private float _cachedBoundaryPower = -1f;
+
     public Plugin(
         IDalamudPluginInterface pi,
         ITargetManager target,
@@ -84,7 +102,8 @@ public sealed class Plugin : IAsyncDalamudPlugin
         IFramework framework,
         ICommandManager command,
         IPluginLog log,
-        INamePlateGui namePlateGui)
+        INamePlateGui namePlateGui,
+        ITextureProvider textureProvider)
     {
         _pi = pi;
         _target = target;
@@ -97,6 +116,7 @@ public sealed class Plugin : IAsyncDalamudPlugin
         _log = log;
         // 注入 INamePlateGui，用于修改游戏原生头顶名牌
         _namePlateGui = namePlateGui;
+        _textureProvider = textureProvider;
         Log = log;
 
         _config = pi.GetPluginConfig() as PluginConfig ?? new PluginConfig();
@@ -131,6 +151,8 @@ public sealed class Plugin : IAsyncDalamudPlugin
 
     public async ValueTask DisposeAsync()
     {
+        // 释放边界蒙版纹理
+        _boundaryGradientTexture?.Dispose();
         // 释放名牌隐藏控制器，取消事件订阅并恢复名牌显示
         _namePlateHider.Dispose();
         _pi.UiBuilder.OpenMainUi -= OnOpenMainUi;
@@ -166,6 +188,8 @@ public sealed class Plugin : IAsyncDalamudPlugin
         // 游戏进行中 → 显示躲猫猫 HUD
         if (_mainWindow.OverlayVisible)
         {
+            DrawBoundaryMask();
+
             var gx = _config.GameOverlayX;
             var gy = _config.GameOverlayY;
             DrawDraggableOverlay(_mainWindow.OverlayText, ColorWithDist(_mainWindow.NearestCatDistance), ref gx, ref gy);
@@ -183,6 +207,72 @@ public sealed class Plugin : IAsyncDalamudPlugin
         DrawDraggableOverlay(t, ColorWithDist(dist), ref ox, ref oy);
         _config.OverlayX = ox;
         _config.OverlayY = oy;
+    }
+
+    /// <summary>边界蒙版：鼠队距边缘 ≤20 yalms 时径向渐变（中心透明→边缘红）</summary>
+    private void DrawBoundaryMask()
+    {
+        if (!_mainWindow.BoundaryWarning) return;
+
+        // 透明范围变化时重建纹理
+        var power = _config.BoundaryMaskPower;
+        if (Math.Abs(power - _cachedBoundaryPower) > 0.01f)
+        {
+            _boundaryGradientTexture?.Dispose();
+            _boundaryGradientTexture = CreateRadialGradientTexture(256, power);
+            _cachedBoundaryPower = power;
+        }
+
+        if (_boundaryGradientTexture == null) return;
+
+        // 距边界越近 → 蒙版越浓（10 yalms 时几乎透明，0 yalms 时全红）
+        var dist = _mainWindow.DistanceToBoundary;
+        var alpha = Math.Clamp(1f - dist / 10f, 0f, 1f);
+
+        var draw = ImGui.GetForegroundDrawList();
+        var screenPos = Vector2.Zero;
+        var screenSize = ImGui.GetIO().DisplaySize;
+
+        draw.AddImage(
+            _boundaryGradientTexture.Handle,
+            screenPos,
+            screenPos + screenSize,
+            Vector2.Zero,
+            Vector2.One,
+            ImGui.ColorConvertFloat4ToU32(new Vector4(1f, 0f, 0f, alpha)));
+    }
+
+    /// <summary>生成径向渐变 RGBA 纹理（中心透明 → 边缘不透明）。</summary>
+    private IDalamudTextureWrap CreateRadialGradientTexture(int size, float sliderPower)
+    {
+        // 滑块 0→100 映射到 power 0.3→5.0
+        var p = 0.3f + sliderPower / 100f * 4.7f;
+
+        var bytes = new byte[size * size * 4];
+        var cx = size / 2f;
+        var cy = size / 2f;
+        var maxDist = MathF.Sqrt(cx * cx + cy * cy);
+
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                var dx = x - cx;
+                var dy = y - cy;
+                var dist = MathF.Sqrt(dx * dx + dy * dy);
+                var t = Math.Clamp(dist / maxDist, 0f, 1f);
+                var alpha = (byte)(Math.Pow(t, p) * 255);
+
+                var i = (y * size + x) * 4;
+                bytes[i + 0] = 255; // B
+                bytes[i + 1] = 255; // G
+                bytes[i + 2] = 255; // R
+                bytes[i + 3] = alpha; // A
+            }
+        }
+
+        var specs = RawImageSpecification.Bgra32(size, size);
+        return _textureProvider.CreateFromRaw(specs, bytes, "HideCatCatBoundaryGradient");
     }
 
     private static uint ColorWithDist(float dist) => dist switch

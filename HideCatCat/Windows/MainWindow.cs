@@ -24,9 +24,17 @@ public sealed class MainWindow : Window
     private string _roomServer = "";
     private uint _roomTerritoryId;
 
+    private const string DefaultServerUrl = "wss://hidecatcat.19730123.xyz:19174/ws";
+
     // 关于/设置面板折叠状态
     private bool _showAbout;
     private bool _showSettings;
+
+    // 自定义服务器地址输入缓冲区
+    private string _customUrlInput = "";
+
+    private static string ServerDisplayName(string url) =>
+        url == DefaultServerUrl ? "默认躲猫猫服务器地址" : url;
 
     // Game state (from server)
     private readonly object _playersLock = new();
@@ -38,8 +46,11 @@ public sealed class MainWindow : Window
     private DateTime _gameStartTime;
     private int _timeLimitSec;
     private double _startX, _startY, _startZ;
+    private float _boundaryRadius = 50f;
     private string _lastEvent = "";
     private bool _gameOver;
+    private int _catWins;
+    private int _mouseWins;
 
     public MainWindow(Plugin plugin, GameClient gameClient) : base("Hide Cat Cat")
     {
@@ -66,6 +77,22 @@ public sealed class MainWindow : Window
     public string OverlayText { get; private set; } = "";
     /// <summary>最近猫的距离（鼠队HUD着色用）</summary>
     public float NearestCatDistance { get; private set; }
+    /// <summary>鼠队距边界剩余距离（yalms），负值=已越界</summary>
+    public float DistanceToBoundary
+    {
+        get
+        {
+            if (!_gameStarted || _selectedTeam != "MOUSE") return float.MaxValue;
+            var dist = Math.Sqrt(
+                Math.Pow(_plugin.LocalPlayerPosition.X - _startX, 2) +
+                Math.Pow(_plugin.LocalPlayerPosition.Y - _startY, 2) +
+                Math.Pow(_plugin.LocalPlayerPosition.Z - _startZ, 2));
+            return _boundaryRadius - (float)dist;
+        }
+    }
+
+    /// <summary>边界警告：鼠队距边缘 ≤10 yalms 时触发，供 Plugin 绘制蒙版</summary>
+    public bool BoundaryWarning => DistanceToBoundary <= 10f;
 
     public override void Draw()
     {
@@ -90,6 +117,14 @@ public sealed class MainWindow : Window
             ImGui.SetTooltip("关于躲猫猫");
 
         ImGui.Separator();
+
+        // 边界警告文字（鼠队+游戏开始后）
+        if (_gameStarted && _selectedTeam == "MOUSE" && BoundaryWarning)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.2f, 0.2f, 1f));
+            ImGui.TextWrapped($"⚠ 接近边界！距边缘还有 {DistanceToBoundary:F1} yalms");
+            ImGui.PopStyleColor();
+        }
 
         // HUD 编辑模式开关（仅鼠队+游戏开始后显示）
         if (_gameStarted && _selectedTeam == "MOUSE")
@@ -128,9 +163,35 @@ public sealed class MainWindow : Window
             ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0.15f, 0.15f, 0.2f, 0.85f));
             ImGui.BeginChild("##SettingsPanel", new Vector2(0, 80), true);
             ImGui.TextWrapped("躲猫猫服务器地址（可自建服务端后修改）:");
-            var serverUrl = _plugin.ServerUrl;
-            if (ImGui.InputText("##ServerUrl", ref serverUrl, 100))
-                _plugin.ServerUrl = serverUrl;
+            var preview = ServerDisplayName(_plugin.ServerUrl);
+            if (ImGui.BeginCombo("##ServerUrl", preview))
+            {
+                // 默认选项
+                if (ImGui.Selectable("默认躲猫猫服务器地址", _plugin.ServerUrl == DefaultServerUrl))
+                    _plugin.ServerUrl = DefaultServerUrl;
+
+                // 历史记录
+                foreach (var url in _plugin.ServerHistory)
+                {
+                    if (ImGui.Selectable(url, url == _plugin.ServerUrl))
+                        _plugin.ServerUrl = url;
+                }
+
+                ImGui.Separator();
+
+                // 自定义输入
+                ImGui.InputText("##CustomUrl", ref _customUrlInput, 200);
+                ImGui.SameLine();
+                if (ImGui.SmallButton("添加") && !string.IsNullOrWhiteSpace(_customUrlInput))
+                {
+                    var url = _customUrlInput.Trim();
+                    _plugin.AddServerToHistory(url);
+                    _plugin.ServerUrl = url;
+                    _customUrlInput = "";
+                }
+
+                ImGui.EndCombo();
+            }
             ImGui.EndChild();
             ImGui.PopStyleColor();
             ImGui.Spacing();
@@ -168,7 +229,7 @@ public sealed class MainWindow : Window
         // 服务器地址（只读 + 齿轮按钮修改）
         ImGui.Text("服务器:");
         ImGui.SameLine();
-        ImGui.TextDisabled(_plugin.ServerUrl);
+        ImGui.TextDisabled(ServerDisplayName(_plugin.ServerUrl));
         ImGui.SameLine();
         DrawGearButton();
 
@@ -327,13 +388,27 @@ public sealed class MainWindow : Window
             if (_gameOver)
             {
                 ImGui.TextColored(new Vector4(0.2f, 0.8f, 1f, 1f), "游戏结束");
+                ImGui.Text($"猫队 {_catWins} 胜  —  鼠队 {_mouseWins} 胜");
+
+                // 选择重新开始的队伍
+                var teams = new[] { "CAT", "MOUSE" };
+                var teamNames = new[] { "猫队", "鼠队" };
+                var curIdx = Array.IndexOf(teams, _selectedTeam);
+                if (curIdx < 0) curIdx = 0;
+                ImGui.Text("重新开始队伍:");
+                ImGui.SameLine();
+                ImGui.PushItemWidth(100);
+                if (ImGui.Combo("##restartTeam", ref curIdx, teamNames, teamNames.Length))
+                    _selectedTeam = teams[curIdx];
+                ImGui.PopItemWidth();
+
                 if (ImGui.Button("[重新开始]", new Vector2(200, 30)))
                 {
-                    Plugin.Log.Info("[UI] 点击重新开始");
+                    Plugin.Log.Info($"[UI] 点击重新开始 team={_selectedTeam}");
                     ResetLocalState();
                     _gameOver = false;
-                    // 通知服务器重置房间
-                    _ = _gameClient.SendAsync(new { type = "RESET_ROOM", password = _password });
+                    // 通知服务器重置房间（可带换队）
+                    _ = _gameClient.SendAsync(new { type = "RESET_ROOM", password = _password, team = _selectedTeam });
                 }
             }
             else
@@ -348,8 +423,9 @@ public sealed class MainWindow : Window
                 {
                     if (ImGui.Button("[开始游戏]", new Vector2(200, 30)))
                     {
-                        Plugin.Log.Info("[UI] 房主点击开始游戏");
-                        _ = _gameClient.SendAsync(new { type = "START_GAME", password = _password });
+                        var pos = _plugin.LocalPlayerPosition;
+                        Plugin.Log.Info($"[UI] 房主点击开始游戏 pos=({pos.X:F1},{pos.Y:F1},{pos.Z:F1})");
+                        _ = _gameClient.SendAsync(new { type = "START_GAME", password = _password, position = new { x = pos.X, y = pos.Y, z = pos.Z } });
                     }
                 }
             }
@@ -546,10 +622,16 @@ public sealed class MainWindow : Window
                     lock (_playersLock) { _players = newList; }
                     _hasJoined = GetPlayersSnapshot().Any(p => p.name == _playerName);
                     if (_hasJoined) _errorMessage = "";
+                    // 从服务器同步当前玩家队伍（换队后确保本地一致）
+                    var me = newList.FirstOrDefault(p => p.name == _playerName);
+                    if (me != null) _selectedTeam = me.team;
                     // 同步房间基准服务器和地图
                     _roomServer = jsonTryGetString(json, "roomServer");
                     if (json.TryGetProperty("roomTerritoryId", out var rt) && rt.ValueKind == JsonValueKind.Number)
                         _roomTerritoryId = rt.GetUInt32();
+                    // 房间级别胜负累计
+                    _catWins = jsonTryGetInt(json, "catWins");
+                    _mouseWins = jsonTryGetInt(json, "mouseWins");
                     break;
                 }
 
@@ -568,7 +650,8 @@ public sealed class MainWindow : Window
                         _startY = jsonTryGetDouble(sp, "y");
                         _startZ = jsonTryGetDouble(sp, "z");
                     }
-                    _lastEvent = $"游戏开始！半径: {TryGetSingle(json, "radius", 50f):F0} yalms";
+                    _boundaryRadius = TryGetSingle(json, "radius", 50f);
+                    _lastEvent = $"游戏开始！半径: {_boundaryRadius:F0} yalms";
                     break;
 
                 case "CATCH_EVENT":
@@ -583,6 +666,8 @@ public sealed class MainWindow : Window
                 case "GAME_OVER":
                     _gameStarted = false;
                     _gameOver = true;
+                    _catWins = jsonTryGetInt(json, "catWins");
+                    _mouseWins = jsonTryGetInt(json, "mouseWins");
                     _lastEvent = $"Winner: {jsonTryGetString(json, "winner")}! {jsonTryGetString(json, "reason")}";
                     break;
             }
