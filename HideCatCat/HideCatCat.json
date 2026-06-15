@@ -1,13 +1,15 @@
 {
-    "Author": "YourName",
+    "Author": "向坂环",
     "Name": "Hide Cat Cat",
-    "Punchline": "A minimal Hide Cat Cat plugin",
-    "Description": "A basic Dalamud plugin template with command, config window, and DI.",
+    "Punchline": "躲猫猫小游戏",
+    "Description": "在游戏中与队友玩躲猫猫，通过聊天指令隐藏和寻找猫猫。",
     "IconUrl": "",
     "RepoUrl": "",
     "ApplicableVersion": "any",
     "Tags": [
-        "hide-cat-cat",
-        "minigame"
+        "躲猫猫",
+        "小游戏",
+        "休闲",
+        "互动"
     ]
 }

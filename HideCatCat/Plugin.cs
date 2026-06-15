@@ -11,6 +11,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using HideCatCat.Windows;
+using Lumina.Excel.Sheets;
 
 namespace HideCatCat;
 
@@ -29,6 +30,7 @@ public sealed class Plugin : IAsyncDalamudPlugin
     private readonly IPluginLog _log;
     private readonly INamePlateGui _namePlateGui;
     private readonly ITextureProvider _textureProvider;
+    private readonly IDataManager _dataManager;
 
     public static IPluginLog Log { get; private set; } = null!;
 
@@ -56,6 +58,18 @@ public sealed class Plugin : IAsyncDalamudPlugin
 
     /// <summary>当前地图 ID（TerritoryType）</summary>
     public uint CurrentTerritoryId => _client.TerritoryType;
+
+    /// <summary>当前地图名称</summary>
+    public string CurrentTerritoryName
+    {
+        get
+        {
+            var sheet = _dataManager.GetExcelSheet<TerritoryType>();
+            if (sheet == null) return "";
+            var row = sheet.GetRow(CurrentTerritoryId);
+            return row.PlaceName.Value.Name.ToString() ?? "";
+        }
+    }
 
     /// <summary>WebSocket 服务器地址（持久化）</summary>
     public string ServerUrl
@@ -103,7 +117,8 @@ public sealed class Plugin : IAsyncDalamudPlugin
         ICommandManager command,
         IPluginLog log,
         INamePlateGui namePlateGui,
-        ITextureProvider textureProvider)
+        ITextureProvider textureProvider,
+        IDataManager dataManager)
     {
         _pi = pi;
         _target = target;
@@ -117,6 +132,7 @@ public sealed class Plugin : IAsyncDalamudPlugin
         // 注入 INamePlateGui，用于修改游戏原生头顶名牌
         _namePlateGui = namePlateGui;
         _textureProvider = textureProvider;
+        _dataManager = dataManager;
         Log = log;
 
         _config = pi.GetPluginConfig() as PluginConfig ?? new PluginConfig();
@@ -162,6 +178,7 @@ public sealed class Plugin : IAsyncDalamudPlugin
         _command.RemoveHandler(CommandName);
 
         _gameClient.Dispose();
+        _mainWindow.DisposeLobby();
 
         _mainWindow.IsOpen = false;
         _windowSystem.RemoveAllWindows();

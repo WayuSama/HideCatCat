@@ -26,6 +26,42 @@ public class GameClient : IDisposable
     /// <summary>发生错误时触发</summary>
     public event Action<string>? OnError;
 
+    /// <summary>连接到大厅（浏览公开房间），不需要口令</summary>
+    public async Task ConnectLobbyAsync(string serverUrl)
+    {
+        var lobbyUrl = $"{serverUrl}/lobby";
+        if (!Uri.TryCreate(lobbyUrl, UriKind.Absolute, out _))
+        {
+            var error = $"无效的大厅地址: {lobbyUrl}";
+            Plugin.Log.Warning($"[GameClient] ❌ {error}");
+            OnError?.Invoke(error);
+            OnConnectionChanged?.Invoke(false);
+            return;
+        }
+
+        _password = "";
+        _cts = new CancellationTokenSource();
+
+        Plugin.Log.Info($"[GameClient] 正在连接大厅 {lobbyUrl}");
+        try
+        {
+            _ws = new ClientWebSocket();
+            await _ws.ConnectAsync(new Uri(lobbyUrl), _cts.Token);
+
+            Plugin.Log.Info($"[GameClient] ✅ 已连接大厅");
+            OnConnectionChanged?.Invoke(true);
+
+            _ = Task.Run(() => ReceiveLoop(_cts.Token));
+        }
+        catch (Exception ex)
+        {
+            var error = $"大厅连接失败: {ex.Message}";
+            Plugin.Log.Warning($"[GameClient] ❌ {error}");
+            OnError?.Invoke(error);
+            OnConnectionChanged?.Invoke(false);
+        }
+    }
+
     /// <summary>连接到服务器，传入服务器地址和口令</summary>
     public async Task ConnectAsync(string serverUrl, string password)
     {

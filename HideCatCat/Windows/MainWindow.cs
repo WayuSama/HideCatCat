@@ -10,6 +10,7 @@ public sealed class MainWindow : Window
 {
     private readonly Plugin _plugin;
     private readonly GameClient _gameClient;
+    private readonly GameClient _lobbyClient;
 
     // UI state
     private string _password = "";
@@ -52,10 +53,20 @@ public sealed class MainWindow : Window
     private int _catWins;
     private int _mouseWins;
 
+    private bool _showLobby = true;  // 默认展开大厅
+    private bool _lobbyPendingConnect;  // 大厅连接进行中，避免重复连接
+    private string _lobbyError = "";
+    private readonly List<PublicRoomEntry> _publicRooms = new();
+    private readonly List<JoinResultEntry> _joinResults = new();
+    private readonly List<JoinRequestEntry> _joinRequests = new();
+    private bool _isPublicRoom;
+    private string _appliedRoom = "";
+
     public MainWindow(Plugin plugin, GameClient gameClient) : base("Hide Cat Cat")
     {
         _plugin = plugin;
         _gameClient = gameClient;
+        _lobbyClient = new GameClient();
 
         SizeConstraints = new WindowSizeConstraints
         {
@@ -66,6 +77,10 @@ public sealed class MainWindow : Window
         _gameClient.OnMessage += OnServerMessage;
         _gameClient.OnConnectionChanged += OnConnectionChanged;
         _gameClient.OnError += OnError;
+
+        _lobbyClient.OnMessage += OnLobbyMessage;
+        _lobbyClient.OnConnectionChanged += OnLobbyConnectionChanged;
+        _lobbyClient.OnError += OnLobbyError;
     }
 
     /// <summary>游戏是否正在进行中。供 Plugin.OnFrameworkUpdate 判断是否启用名牌隐藏。</summary>
@@ -99,13 +114,58 @@ public sealed class MainWindow : Window
         // 顶栏：连接状态 + 按钮
         if (_gameClient.IsConnected)
         {
-            ImGui.TextColored(new Vector4(0.2f, 0.9f, 0.3f, 1f), "● 已连接");
+            if (!string.IsNullOrEmpty(_hostName))
+            {
+                var roomName = $"{_hostName}@{_roomServer} - {_plugin.CurrentTerritoryName}";
+                ImGui.TextColored(new Vector4(0.2f, 0.9f, 0.3f, 1f), $"● 已进入房间 | {roomName}");
+            }
+            else
+            {
+                ImGui.TextColored(new Vector4(0.2f, 0.9f, 0.3f, 1f), "● 已进入房间");
+            }
             ImGui.SameLine();
             if (ImGui.Button("断开")) _ = _gameClient.DisconnectAsync();
         }
         else
         {
-            ImGui.TextColored(new Vector4(0.9f, 0.3f, 0.3f, 1f), "● 未连接");
+            ImGui.TextColored(new Vector4(0.9f, 0.3f, 0.3f, 1f), "● 未进入房间");
+        }
+
+        // 大厅状态（仅在未进入房间时显示）
+        if (!_gameClient.IsConnected)
+        {
+            ImGui.SameLine();
+            string lobbyText;
+            bool lobbyClickable = false;
+            
+            if (_lobbyClient.IsConnected)
+            {
+                lobbyText = _showLobby ? " | 大厅已连（点击关闭）" : " | 大厅已连（点击展开）";
+                lobbyClickable = true;
+            }
+            else if (_lobbyPendingConnect)
+            {
+                lobbyText = " | 大厅连接中...";
+            }
+            else
+            {
+                lobbyText = " | 大厅已连（点击展开）";
+                lobbyClickable = true;
+            }
+            
+            var cursor = ImGui.GetCursorScreenPos();
+            ImGui.TextColored(new Vector4(0.3f, 0.7f, 1f, 1f), lobbyText);
+            var itemSize = ImGui.GetItemRectSize();
+            ImGui.SetCursorScreenPos(cursor);
+            if (lobbyClickable && ImGui.InvisibleButton("##LobbyToggle", itemSize))
+            {
+                _showLobby = !_showLobby;
+                if (!_showLobby)
+                {
+                    _lobbyPendingConnect = false;
+                    _ = _lobbyClient.DisconnectAsync();
+                }
+            }
         }
 
         // 圆形 ? 按钮（紧挨连接状态）
@@ -117,8 +177,6 @@ public sealed class MainWindow : Window
             ImGui.SetTooltip("关于躲猫猫");
 
         ImGui.Separator();
-
-        // 边界警告文字（鼠队+游戏开始后）
         if (_gameStarted && _selectedTeam == "MOUSE" && BoundaryWarning)
         {
             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.2f, 0.2f, 1f));
@@ -197,6 +255,20 @@ public sealed class MainWindow : Window
             ImGui.Spacing();
         }
 
+        // 空闲时自动连接大厅（展开状态下）
+        if (!_gameClient.IsConnected && _showLobby && !_lobbyClient.IsConnected && !_lobbyPendingConnect)
+        {
+            _lobbyPendingConnect = true;
+            _ = _lobbyClient.ConnectLobbyAsync(_plugin.ServerUrl);
+        }
+
+        // Lobby 面板（公开房间浏览）
+        if (_showLobby && _lobbyClient.IsConnected)
+        {
+            DrawLobbyPanel();
+            ImGui.Separator();
+        }
+
         // 连接面板
         if (!_gameClient.IsConnected)
         {
@@ -213,6 +285,91 @@ public sealed class MainWindow : Window
 
         // 已加入房间 → 游戏主面板
         DrawGamePanel();
+    }
+
+    private void DrawLobbyPanel()
+    {
+        ImGui.TextColored(new Vector4(0.3f, 0.7f, 1f, 1f), "── 公开房间大厅 ──");
+
+        if (!string.IsNullOrEmpty(_lobbyError))
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.3f, 0.3f, 1f));
+            ImGui.TextWrapped(_lobbyError);
+            ImGui.PopStyleColor();
+            ImGui.Spacing();
+        }
+
+        ImGui.Separator();
+
+        if (_publicRooms.Count == 0)
+        {
+            ImGui.TextDisabled("暂无公开房间");
+            return;
+        }
+
+        ImGui.Text($"共 {_publicRooms.Count} 个公开房间:");
+        ImGui.Separator();
+
+        foreach (var room in _publicRooms)
+        {
+            // 隐藏自己的房间
+            if (room.hostName == _playerName) continue;
+
+            var stateLabel = room.state switch { "PLAYING" => "游戏中", "FINISHED" => "已结束", _ => "等待中" };
+            ImGui.TextWrapped($"{room.roomName}");
+            ImGui.TextDisabled($"  房主: {room.hostName} | {room.roomServer} | {room.territoryName}");
+            ImGui.SameLine();
+            ImGui.TextColored(room.state == "PLAYING" ? new Vector4(1f, 0.5f, 0.2f, 1f) : new Vector4(0.2f, 0.9f, 0.3f, 1f), $"[{stateLabel}]");
+            ImGui.SameLine();
+            ImGui.Text($" {room.playerCount}人");
+
+            ImGui.SameLine();
+            ImGui.PushID($"apply_{room.roomName}");
+            if (ImGui.SmallButton("申请加入"))
+            {
+                _ = _lobbyClient.SendAsync(new
+                {
+                    type = "APPLY_JOIN_ROOM",
+                    roomId = room.roomId,
+                    playerName = _playerName,
+                    playerServer = _plugin.CurrentWorldName,
+                    territoryId = _plugin.CurrentTerritoryId
+                });
+                _appliedRoom = room.roomId;
+            }
+            ImGui.PopID();
+
+            ImGui.Separator();
+        }
+
+        if (_joinResults.Count > 0)
+        {
+            ImGui.Separator();
+            ImGui.TextColored(new Vector4(1f, 0.9f, 0.4f, 1f), "── 申请结果 ──");
+            foreach (var r in _joinResults)
+            {
+                var mark = r.accepted ? "✓" : "✗";
+                var color = r.accepted ? new Vector4(0.2f, 0.9f, 0.3f, 1f) : new Vector4(0.9f, 0.3f, 0.3f, 1f);
+                ImGui.PushStyleColor(ImGuiCol.Text, color);
+                ImGui.TextWrapped($"{mark} {r.roomName}  房主: {r.hostName}");
+                ImGui.PopStyleColor();
+                if (r.accepted && !string.IsNullOrEmpty(r.password))
+                {
+                    ImGui.TextDisabled($"  密码: {r.password} | {r.roomServer}");
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton("复制##cp" + r.requestId))
+                        ImGui.SetClipboardText(r.password);
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton("加入##join" + r.requestId))
+                    {
+                        _showLobby = false;
+                        _password = r.password;
+                        _ = _lobbyClient.DisconnectAsync();
+                        _ = _gameClient.ConnectAsync(_plugin.ServerUrl, r.password);
+                    }
+                }
+            }
+        }
     }
 
     private void DrawConnectPanel()
@@ -253,6 +410,8 @@ public sealed class MainWindow : Window
             Plugin.Log.Info($"[UI] 点击连接 url={_plugin.ServerUrl} password=*** player={_playerName}");
             _ = _gameClient.ConnectAsync(_plugin.ServerUrl, _password);
         }
+
+        ImGui.Spacing();
 
         if (!string.IsNullOrEmpty(_errorMessage))
         {
@@ -324,7 +483,8 @@ public sealed class MainWindow : Window
         Plugin.Log.Info($"[UI] 发送 JOIN_ROOM team={team}");
         var server = _plugin.CurrentWorldName;
         var territoryId = _plugin.CurrentTerritoryId;
-        await _gameClient.SendAsync(new { type = "JOIN_ROOM", password = _password, playerName = _playerName, playerServer = server, territoryId, team });
+        var territoryName = _plugin.CurrentTerritoryName;
+        await _gameClient.SendAsync(new { type = "JOIN_ROOM", password = _password, playerName = _playerName, playerServer = server, territoryId, territoryName, team });
     }
 
     private void DrawGamePanel()
@@ -364,6 +524,18 @@ public sealed class MainWindow : Window
 
             if (ImGui.Button("[应用设置]", new Vector2(200, 25)))
                 _ = SendSettings();
+
+            ImGui.Spacing();
+            if (ImGui.Checkbox("公开房间", ref _isPublicRoom))
+            {
+                _ = _gameClient.SendAsync(new { type = "SET_ROOM_PUBLIC", password = _password, isPublic = _isPublicRoom });
+            }
+            if (_isPublicRoom)
+            {
+                var roomName = $"{_hostName}@{_roomServer} - {_plugin.CurrentTerritoryName}";
+                ImGui.TextDisabled($"  房间名: {roomName}");
+            }
+            ImGui.Separator();
         }
 
         ImGui.Separator();
@@ -381,6 +553,8 @@ public sealed class MainWindow : Window
         }
 
         ImGui.Separator();
+
+        DrawJoinRequests();
 
         // 准备 & 开始 / 重新开始
         if (!_gameStarted)
@@ -526,6 +700,49 @@ public sealed class MainWindow : Window
         await _gameClient.SendAsync(payload);
     }
 
+    private void DrawJoinRequests()
+    {
+        if (_joinRequests.Count == 0) return;
+
+        var isHost = _playerName == _hostName;
+        ImGui.TextColored(new Vector4(0.3f, 0.7f, 1f, 1f), "── 加入申请 ──");
+
+        foreach (var req in _joinRequests.ToList())
+        {
+            if (req.status == "PENDING")
+            {
+                ImGui.TextWrapped($"  申请人: {req.applicantName} | 服务器: {req.applicantServer} | 地图: {req.applicantTerritoryId}");
+                if (isHost)
+                {
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton($"接受##acc{req.requestId}"))
+                    {
+                        _ = _gameClient.SendAsync(new { type = "RESPOND_JOIN_REQUEST", password = _password, requestId = req.requestId, accepted = true });
+                    }
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton($"拒绝##rej{req.requestId}"))
+                    {
+                        _ = _gameClient.SendAsync(new { type = "RESPOND_JOIN_REQUEST", password = _password, requestId = req.requestId, accepted = false });
+                    }
+                }
+                else
+                {
+                    ImGui.SameLine();
+                    ImGui.TextDisabled("等待房主处理...");
+                }
+            }
+            else
+            {
+                var mark = req.status == "ACCEPTED" ? "✓" : "✗";
+                var color = req.status == "ACCEPTED" ? new Vector4(0.2f, 0.9f, 0.3f, 1f) : new Vector4(0.9f, 0.3f, 0.3f, 1f);
+                ImGui.PushStyleColor(ImGuiCol.Text, color);
+                ImGui.TextWrapped($"  {mark} 申请人: {req.applicantName}  {(req.status == "ACCEPTED" ? "已接受" : "已拒绝")}");
+                ImGui.PopStyleColor();
+            }
+        }
+        ImGui.Separator();
+    }
+
     private void ResetLocalState()
     {
         _gameOver = false;
@@ -541,13 +758,25 @@ public sealed class MainWindow : Window
 
     private void OnConnectionChanged(bool connected)
     {
-        if (!connected)
+        if (connected)
         {
+            // 进入游戏房间 → 断开大厅
+            _showLobby = false;
+            _lobbyPendingConnect = false;
+            _ = _lobbyClient.DisconnectAsync();
+        }
+        else
+        {
+            // 离开游戏房间 → 恢复大厅
+            _showLobby = true;
             _selectedTeam = "";
             _hasJoined = false;
+            _hostName = "";
             _roomServer = "";
             _roomTerritoryId = 0;
+            _isPublicRoom = false;
             lock (_playersLock) { _players.Clear(); }
+            _joinRequests.Clear();
             _gameStarted = false;
             _gameOver = false;
         }
@@ -670,6 +899,29 @@ public sealed class MainWindow : Window
                     _mouseWins = jsonTryGetInt(json, "mouseWins");
                     _lastEvent = $"Winner: {jsonTryGetString(json, "winner")}! {jsonTryGetString(json, "reason")}";
                     break;
+
+                case "JOIN_REQUEST":
+                {
+                    var req = new JoinRequestEntry
+                    {
+                        requestId = jsonTryGetString(json, "requestId"),
+                        applicantName = jsonTryGetString(json, "applicantName"),
+                        applicantServer = jsonTryGetString(json, "applicantServer"),
+                        applicantTerritoryId = jsonTryGetLong(json, "applicantTerritoryId"),
+                        status = "PENDING"
+                    };
+                    _joinRequests.Add(req);
+                    break;
+                }
+                case "JOIN_REQUEST_UPDATE":
+                {
+                    var rid = jsonTryGetString(json, "requestId");
+                    var accepted = json.TryGetProperty("accepted", out var ac) && ac.ValueKind == JsonValueKind.True;
+                    var existing = _joinRequests.FirstOrDefault(r => r.requestId == rid);
+                    if (existing != null)
+                        existing.status = accepted ? "ACCEPTED" : "REJECTED";
+                    break;
+                }
             }
         }
         catch (Exception ex)
@@ -687,6 +939,13 @@ public sealed class MainWindow : Window
     {
         if (el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number)
             return v.GetInt32();
+        return 0;
+    }
+
+    private static long jsonTryGetLong(JsonElement el, string key)
+    {
+        if (el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number)
+            return v.GetInt64();
         return 0;
     }
 
@@ -712,5 +971,119 @@ public sealed class MainWindow : Window
         public bool isHost;
         public bool eliminated;
         public double x, y, z;
+    }
+
+    private class PublicRoomEntry
+    {
+        public string roomId = "";
+        public string roomName = "";
+        public string hostName = "";
+        public string roomServer = "";
+        public long territoryId;
+        public string territoryName = "";
+        public string state = "";
+        public int playerCount;
+    }
+
+    private class JoinResultEntry
+    {
+        public string requestId = "";
+        public bool accepted;
+        public string password = "";
+        public string roomName = "";
+        public string hostName = "";
+        public string roomServer = "";
+        public long territoryId;
+    }
+
+    private class JoinRequestEntry
+    {
+        public string requestId = "";
+        public string applicantName = "";
+        public string applicantServer = "";
+        public long applicantTerritoryId;
+        public string status = ""; // PENDING / ACCEPTED / REJECTED
+    }
+
+    private void OnLobbyMessage(JsonElement json)
+    {
+        try
+        {
+            if (!json.TryGetProperty("type", out var typeEl) || typeEl.ValueKind != JsonValueKind.String)
+                return;
+            var type = typeEl.GetString()!;
+            Plugin.Log.Info($"[UI-Lobby] 收到 {type}");
+            switch (type.ToUpperInvariant())
+            {
+                case "PUBLIC_ROOMS_LIST":
+                {
+                    _publicRooms.Clear();
+                    if (json.TryGetProperty("rooms", out var roomsEl) && roomsEl.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var r in roomsEl.EnumerateArray())
+                        {
+                            _publicRooms.Add(new PublicRoomEntry
+                            {
+                                roomId = jsonTryGetString(r, "roomId"),
+                                roomName = jsonTryGetString(r, "roomName"),
+                                hostName = jsonTryGetString(r, "hostName"),
+                                roomServer = jsonTryGetString(r, "roomServer"),
+                                territoryId = jsonTryGetLong(r, "territoryId"),
+                                territoryName = jsonTryGetString(r, "territoryName"),
+                                state = jsonTryGetString(r, "state"),
+                                playerCount = jsonTryGetInt(r, "playerCount")
+                            });
+                        }
+                    }
+                    break;
+                }
+                case "JOIN_REQUEST_RESULT":
+                {
+                    var result = new JoinResultEntry
+                    {
+                        requestId = jsonTryGetString(json, "requestId"),
+                        accepted = json.TryGetProperty("accepted", out var ac) && ac.ValueKind == JsonValueKind.True,
+                        roomName = jsonTryGetString(json, "roomName"),
+                        hostName = jsonTryGetString(json, "hostName"),
+                    };
+                    if (result.accepted)
+                    {
+                        result.password = jsonTryGetString(json, "password");
+                        result.roomServer = jsonTryGetString(json, "roomServer");
+                        result.territoryId = jsonTryGetLong(json, "territoryId");
+                    }
+                    _joinResults.Add(result);
+                    break;
+                }
+                case "ERROR":
+                    _lobbyError = jsonTryGetString(json, "message");
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Error($"[UI-Lobby] 处理消息异常: {ex.Message}");
+        }
+    }
+
+    private void OnLobbyConnectionChanged(bool connected)
+    {
+        _lobbyPendingConnect = false;
+        if (connected)
+        {
+            _lobbyError = "";
+            _ = _lobbyClient.SendAsync(new { type = "LIST_PUBLIC_ROOMS" });
+        }
+        else
+        {
+            _publicRooms.Clear();
+            _joinResults.Clear();
+        }
+    }
+    private void OnLobbyError(string error) { _lobbyError = error; _lobbyPendingConnect = false; }
+
+    public void DisposeLobby()
+    {
+        _lobbyClient.Dispose();
     }
 }

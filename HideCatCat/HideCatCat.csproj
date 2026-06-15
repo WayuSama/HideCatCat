@@ -2,7 +2,7 @@
 
 <Project Sdk="Dalamud.CN.NET.Sdk/15.0.0">
     <PropertyGroup>
-        <Authors>YourName</Authors>
+        <Authors>向坂环</Authors>
         <Description>躲猫猫</Description>
         <Version>1.0.0.0</Version>
         <PackageLicenseExpression>MIT</PackageLicenseExpression>
