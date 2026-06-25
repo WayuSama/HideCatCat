@@ -41,6 +41,9 @@ public sealed class Plugin : IAsyncDalamudPlugin
     /// <summary>管理头顶名牌的隐藏/恢复，仅在游戏中且猫队时启用。</summary>
     private readonly NamePlateHider _namePlateHider;
 
+    /// <summary>在世界空间中绘制躲猫猫边界范围圈（Pictomancy 3D 渲染）</summary>
+    private BoundaryOverlay? _boundaryOverlay;
+
     /// <summary>当前选中目标的检测结果。</summary>
     public TargetInfo CurrentTarget { get; } = new();
 
@@ -152,6 +155,13 @@ public sealed class Plugin : IAsyncDalamudPlugin
         _pi.UiBuilder.Draw += _windowSystem.Draw;
         _pi.UiBuilder.Draw += DrawOverlay;
 
+        // 初始化边界圈绘制（Pictomancy 3D 世界空间圆圈）
+        _boundaryOverlay = new BoundaryOverlay(
+            _pi,
+            () => _mainWindow.BoundaryActive,
+            () => _mainWindow.BoundaryCenter,
+            () => _mainWindow.BoundaryRadius);
+
         _command.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage = "Toggle the Hide Cat Cat window"
@@ -169,6 +179,8 @@ public sealed class Plugin : IAsyncDalamudPlugin
     {
         // 释放边界蒙版纹理
         _boundaryGradientTexture?.Dispose();
+        // 释放边界圈绘制
+        _boundaryOverlay?.Dispose();
         // 释放名牌隐藏控制器，取消事件订阅并恢复名牌显示
         _namePlateHider.Dispose();
         _pi.UiBuilder.OpenMainUi -= OnOpenMainUi;
@@ -201,6 +213,9 @@ public sealed class Plugin : IAsyncDalamudPlugin
     private void DrawOverlay()
     {
         var io = ImGui.GetIO();
+
+        // 绘制世界空间 3D 边界范围圈（Pictomancy）
+        _boundaryOverlay?.Draw();
 
         // 游戏进行中 → 显示躲猫猫 HUD
         if (_mainWindow.OverlayVisible)
